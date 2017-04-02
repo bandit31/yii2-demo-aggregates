@@ -7,10 +7,10 @@ use app\entities\Employee\Events;
 use app\entities\EventTrait;
 use app\repositories\InstantiateTrait;
 use app\repositories\LazyLoadTrait;
-use ArrayObject;
 use lhs\Yii2SaveRelationsBehavior\SaveRelationsBehavior;
 use ProxyManager\Proxy\LazyLoadingInterface;
 use yii\db\ActiveRecord;
+use yii\helpers\Json;
 
 /**
  * @property Phone[] $relatedPhones
@@ -41,9 +41,9 @@ class Employee extends ActiveRecord implements AggregateRoot
      */
     private $createDate;
     /**
-     * @var ArrayObject|Status[]
+     * @var Status[]
      */
-    private $statuses;
+    private $statuses = [];
 
     public function __construct(EmployeeId $id, Name $name, Address $address, array $phones)
     {
@@ -51,7 +51,6 @@ class Employee extends ActiveRecord implements AggregateRoot
         $this->name = $name;
         $this->address = $address;
         $this->phones = new Phones($phones);
-        $this->statuses = new ArrayObject();
         $this->createDate = new \DateTimeImmutable();
         $this->addStatus(Status::ACTIVE, $this->createDate);
         $this->recordEvent(new Events\EmployeeCreated($this->id));
@@ -120,8 +119,7 @@ class Employee extends ActiveRecord implements AggregateRoot
 
     private function getCurrentStatus()
     {
-        $statuses = $this->statuses->getArrayCopy();
-        return end($statuses);
+        return end($this->statuses);
     }
 
     private function addStatus($value, \DateTimeImmutable $date)
@@ -134,7 +132,7 @@ class Employee extends ActiveRecord implements AggregateRoot
     public function getPhones() { return $this->phones->getAll(); }
     public function getAddress() { return $this->address; }
     public function getCreateDate() { return $this->createDate; }
-    public function getStatuses() { return $this->statuses->getArrayCopy(); }
+    public function getStatuses() { return $this->statuses; }
 
     ######## INFRASTRUCTURE #########
 
@@ -148,7 +146,7 @@ class Employee extends ActiveRecord implements AggregateRoot
         return [
             [
                 'class' => SaveRelationsBehavior::className(),
-                'relations' => ['relatedPhones', 'relatedStatuses'],
+                'relations' => ['relatedPhones'],
             ],
         ];
     }
@@ -184,9 +182,7 @@ class Employee extends ActiveRecord implements AggregateRoot
             $this->getAttribute('employee_create_date')
         );
 
-        $factory = self::getLazyFactory();
-
-        $this->phones = $factory->createProxy(
+        $this->phones = self::getLazyFactory()->createProxy(
             Phones::class,
             function (&$target, LazyLoadingInterface $proxy) {
                 $target = new Phones($this->relatedPhones);
@@ -194,13 +190,13 @@ class Employee extends ActiveRecord implements AggregateRoot
             }
         );
 
-        $this->statuses = $factory->createProxy(
-            ArrayObject::class,
-            function (&$target, LazyLoadingInterface $proxy) {
-                $target = new ArrayObject($this->relatedStatuses);
-                $proxy->setProxyInitializer(null);
-            }
-        );
+        $this->statuses = array_map(function ($row) {
+            return new Status(
+                $row['value'],
+                new \DateTimeImmutable($row['date'])
+            );
+        }, Json::decode($this->getAttribute('employee_statuses')));
+
 
         parent::afterFind();
     }
@@ -227,9 +223,12 @@ class Employee extends ActiveRecord implements AggregateRoot
             $this->relatedPhones = $this->phones->getAll();
         }
 
-        if (!$this->statuses instanceOf LazyLoadingInterface || $this->statuses->isProxyInitialized()) {
-            $this->relatedStatuses = $this->statuses->getArrayCopy();
-        }
+        $this->setAttribute('employee_statuses', Json::encode(array_map(function (Status $status) {
+            return [
+                'value' => $status->getValue(),
+                'date' => $status->getDate()->format(DATE_RFC3339),
+            ];
+        }, $this->statuses)));
 
         return parent::beforeSave($insert);
     }
@@ -237,10 +236,5 @@ class Employee extends ActiveRecord implements AggregateRoot
     public function getRelatedPhones()
     {
         return $this->hasMany(Phone::className(), ['phone_employee_id' => 'employee_id'])->orderBy('phone_id');
-    }
-
-    public function getRelatedStatuses()
-    {
-        return $this->hasMany(Status::className(), ['status_employee_id' => 'employee_id'])->orderBy('status_id');
     }
 }
